@@ -15,15 +15,18 @@ import {
   FlatList,
   useWindowDimensions,
   Platform,
+  Image as RNImage,
   StyleSheet,
 } from 'react-native';
 
-import 'react-native-get-random-values';   // ← polyfill for older Android
+import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
+import * as ImagePicker from 'expo-image-picker';
+import { MaterialIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import debounce from 'lodash.debounce';
 
-/* ───────── Types & constants ──────── */
+/* ───────── Constants & helpers ───────── */
 interface Product {
   id: number;
   image: string;
@@ -32,6 +35,7 @@ interface Product {
   price: string;
   discounted_price?: string | null;
 }
+
 const ENDPOINT =
   'https://backend.staging.shoppin.app/shopix/api/v2/search';
 const PAGE_SIZE = 20;
@@ -46,7 +50,7 @@ const toUrlEncoded = (obj: Record<string, any>) =>
     )
     .join('&');
 
-/* ─────────────── Component ─────────────── */
+/* ───────────── Main component ─────────── */
 export default function SearchTab() {
   const [query, setQuery] = useState('');
   const [rawResults, setRawResults] = useState<Product[]>([]);
@@ -54,78 +58,114 @@ export default function SearchTab() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const lastSearchId = useRef<string | undefined>(undefined);
+
+  /* responsive columns */
   const { width } = useWindowDimensions();
   const [numColumns, setNumColumns] = useState(() => getNumColumns(width));
   useEffect(() => setNumColumns(getNumColumns(width)), [width]);
 
-  /* ---- search_id thread keeper ---- */
-  const lastSearchId = useRef<string | undefined>(undefined);
+  /* ---------------- Networkers ---------------- */
+  const handleJson = (json: any) => {
+    if (json?.search_id) lastSearchId.current = json.search_id;
+    const data: Product[] = json?.data ?? [];
+    setRawResults((prev) => [...prev, ...data]);
+    setVisible((prev) => [...prev, ...data]);
+  };
 
-  /* -------- network fetch ---------- */
-  const fetchResults = async (q: string, offset = 0) => {
-    if (!q.trim()) return;
+  /** Shared pre-work for a new thread */
+  const wipeAndSeed = () => {
+    setRawResults([]);
+    setVisible([]);
+    lastSearchId.current = uuidv4();
+  };
+
+  const fetchText = async (offset = 0) => {
+    if (!query.trim()) return;
+    if (offset === 0) wipeAndSeed();
+
+    const body = toUrlEncoded({
+      search_type: 'text_search',
+      query: query.trim(),
+      offset,
+      limit: PAGE_SIZE,
+      search_id: lastSearchId.current,
+    });
+
+    await post(body, true, offset === 0);
+  };
+
+  const fetchImage = async (
+    asset: ImagePicker.ImagePickerAsset,
+    offset = 0,
+  ) => {
+    if (offset === 0) wipeAndSeed();
+
+    const blob = await (await fetch(asset.uri)).blob();
+    const fd = new FormData();
+    fd.append('search_type', 'image_search');
+    fd.append('offset', String(offset));
+    fd.append('limit', String(PAGE_SIZE));
+    fd.append(
+      'coordinates',
+      JSON.stringify({ x: 5, y: 5, width: 90, height: 90 }),
+    ); // full frame
+    fd.append('search_id', lastSearchId.current as string);
+    fd.append('file', blob as any, 'photo.jpg');
+
+    await post(fd, false, offset === 0);
+  };
+
+  const post = async (
+    body: any,
+    isFormUrlEncoded: boolean,
+    clearError = false,
+  ) => {
     try {
       setLoading(true);
-      setError(null);
-
-      if (offset === 0) {
-        setRawResults([]);
-        setVisible([]);
-      }
-
-      const body = toUrlEncoded({
-        search_type: 'text_search',
-        query: q.trim(),
-        offset,
-        limit: PAGE_SIZE,
-        search_id: lastSearchId.current!,   // always defined
-      });
+      if (clearError) setError(null);
 
       const res = await fetch(ENDPOINT, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
           client: 'web',
+          ...(isFormUrlEncoded && {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          }),
         },
         body,
       });
 
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      const json = await res.json();
-      const data: Product[] = json?.data ?? [];
-
-      setRawResults((prev) => [...prev, ...data]);
-      setVisible((prev) => [...prev, ...data]);
-    } catch (err: any) {
-      setError(err.message || 'Network error');
+      handleJson(await res.json());
+    } catch (e: any) {
+      setError(e.message || 'Network error');
     } finally {
       setLoading(false);
     }
   };
 
-  /* -------- handlers & memo -------- */
-  const searchHandler = () => {
-    lastSearchId.current = uuidv4();   // 🔑 new UUID each search
-    fetchResults(query, 0);
-  };
+  /* ---------------- Handlers -------------- */
+  const runTextSearch = () => fetchText(0);
 
   const debounced = useRef(
-    debounce((t: string) => {
-      lastSearchId.current = uuidv4();
-      fetchResults(t, 0);
-    }, 500),
+    debounce(() => fetchText(0), 500),
   ).current;
-
-  const handleChangeText = (text: string) => {
-    setQuery(text);
-    // debounced(text);   // enable for live search
-  };
 
   const handleEndReached = () => {
     if (visible.length >= rawResults.length) return;
-    fetchResults(query, rawResults.length);
+    fetchText(rawResults.length);
   };
 
+  const pickAndSearchImage = async () => {
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8,
+    });
+    if (!res.canceled) fetchImage(res.assets[0], 0);
+  };
+
+  /* ---------------- Memo helpers ---------- */
   const keyExtractor = useCallback(
     (item: Product) => String(item.id),
     [],
@@ -137,19 +177,30 @@ export default function SearchTab() {
     [numColumns],
   );
 
-  /* ---------------- UI --------------- */
+  /* ---------------- UI -------------------- */
   return (
     <SafeAreaView style={styles.container}>
+      {/* search bar row */}
       <View style={styles.searchWrapper}>
         <TextInput
           placeholder="Search for skirts, tops, shoes…"
           value={query}
-          onChangeText={handleChangeText}
-          onSubmitEditing={searchHandler}
+          onChangeText={(t) => {
+            setQuery(t);
+            // debounced(); // enable live search
+          }}
+          onSubmitEditing={runTextSearch}
           style={styles.input}
           returnKeyType="search"
         />
-        <Pressable onPress={searchHandler} style={styles.button}>
+
+        {/* Camera icon */}
+        <Pressable onPress={pickAndSearchImage} style={styles.iconBox}>
+          <MaterialIcons name="photo-camera" size={24} color="#555" />
+        </Pressable>
+
+        {/* text search button */}
+        <Pressable onPress={runTextSearch} style={styles.button}>
           <Text style={styles.buttonText}>Search</Text>
         </Pressable>
       </View>
@@ -178,7 +229,7 @@ export default function SearchTab() {
   );
 }
 
-/* ---------- Card component ---------- */
+/* ───────────── Product Card ───────────── */
 interface CardProps {
   item: Product;
   numColumns: number;
@@ -208,9 +259,10 @@ const ProductCard = memo(({ item, numColumns }: CardProps) => {
   );
 });
 
-/* ------------ styles ------------- */
+/* ─────────────── Styles ─────────────── */
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
+
   searchWrapper: {
     flexDirection: 'row',
     padding: 12,
@@ -226,6 +278,12 @@ const styles = StyleSheet.create({
     height: 44,
     fontSize: 16,
   },
+  iconBox: {
+    paddingHorizontal: 6,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   button: {
     backgroundColor: '#ff5a5f',
     paddingHorizontal: 16,
@@ -234,7 +292,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   buttonText: { color: '#fff', fontWeight: '600' },
+
   error: { color: 'crimson', textAlign: 'center', marginTop: 16 },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 10,
