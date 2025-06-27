@@ -1,4 +1,3 @@
-/* eslint-disable react-native/no-inline-styles */
 import React, {
   useState,
   useEffect,
@@ -16,20 +15,20 @@ import {
   FlatList,
   useWindowDimensions,
   Platform,
-  Image as RNImage,
   StyleSheet,
   Modal,
   ScrollView,
+  Linking,
 } from 'react-native';
 import { DimensionValue } from 'react-native';
 import 'react-native-get-random-values';
 import { v4 as uuidv4 } from 'uuid';
 import * as ImagePicker from 'expo-image-picker';
-import { MaterialIcons, Feather } from '@expo/vector-icons';
+import { MaterialIcons, Feather, AntDesign } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import debounce from 'lodash.debounce';
 
-/* ───────── Constants & helpers ───────── */
+/* ───────── Types & constants ───────── */
 interface Product {
   id: number;
   image: string;
@@ -37,21 +36,33 @@ interface Product {
   title: string;
   price: string;
   discounted_price?: string | null;
+  description?: string;
+  link?: string;
+  primary_images?: string[];
+  variant_value_1?: string; // size
+  variant_value_2?: string; // colour
+  color_text_hash?: string;
 }
-const ENDPOINT =
+
+const SEARCH_ENDPOINT =
   'https://backend.staging.shoppin.app/shopix/api/v2/search';
+const DETAIL_ENDPOINT =
+  'https://backend.staging.shoppin.app/shopix/api/v2/search_product_by_uid';
+const SIMILAR_ENDPOINT =
+  'https://backend.staging.shoppin.app/shopix/api/v2/search_similar_products';
 
 const PAGE_SIZE = 20;
 
+/* responsive breakpoints → 1–5 columns */
 const getNumColumns = (w: number) => {
-  if (w >= 1600) return 5;   // ≥ 1600 px  →  5 cards/row
-  if (w >= 1200) return 4;   // ≥ 1200 px  →  4 cards/row
-  if (w >= 900)  return 3;   // ≥ 900 px   →  3 cards/row
-  if (w >= 700)  return 2;   // ≥ 700 px   →  2 cards/row
-  return 1;                  // anything below → single-column
+  if (w >= 1600) return 5;
+  if (w >= 1200) return 4;
+  if (w >= 900) return 3;
+  if (w >= 700) return 2;
+  return 1;
 };
 
-/* encode URL-form fields (skips undefined) */
+/* URL-encode helper */
 const toUrlEncoded = (obj: Record<string, any>) =>
   Object.entries(obj)
     .filter(([, v]) => v !== undefined && v !== null)
@@ -63,11 +74,11 @@ const toUrlEncoded = (obj: Record<string, any>) =>
 
 /* price presets */
 const PRICE_PRESETS = [
-  { label: 'Rs. 0 to Rs. 1 000', min: 0, max: 1000 },
-  { label: 'Rs. 1 000 to Rs. 2 500', min: 1000, max: 2500 },
-  { label: 'Rs. 2 500 to Rs. 5 000', min: 2500, max: 5000 },
-  { label: 'Rs. 5 000 to Rs. 10 000', min: 5000, max: 10000 },
-  { label: 'Rs. 10 000+', min: 10000, max: 1000000 },
+  { label: 'Rs. 0 to Rs. 1 000', min: 0, max: 1_000 },
+  { label: 'Rs. 1 000 to Rs. 2 500', min: 1_000, max: 2_500 },
+  { label: 'Rs. 2 500 to Rs. 5 000', min: 2_500, max: 5_000 },
+  { label: 'Rs. 5 000 to Rs. 10 000', min: 5_000, max: 10_000 },
+  { label: 'Rs. 10 000+', min: 10_000, max: 1_000_000 },
 ];
 
 /* ───────────── Main component ─────────── */
@@ -89,6 +100,11 @@ export default function SearchTab() {
   const [visible, setVisible] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  /* detail modal state */
+  const [detailProduct, setDetailProduct] = useState<Product | null>(null);
+  const [detailImgIdx, setDetailImgIdx] = useState(0);
+  const [similarProducts, setSimilarProducts] = useState<Product[]>([]);
 
   const lastSearchId = useRef<string | undefined>(undefined);
 
@@ -122,7 +138,7 @@ export default function SearchTab() {
   /* -------------- POST wrappers --------------- */
   const postEncoded = async (bodyObj: Record<string, any>) => {
     const body = toUrlEncoded(bodyObj);
-    return fetch(ENDPOINT, {
+    return fetch(SEARCH_ENDPOINT, {
       method: 'POST',
       headers: {
         client: 'web',
@@ -133,7 +149,11 @@ export default function SearchTab() {
   };
 
   const postMultipart = async (fd: FormData) =>
-    fetch(ENDPOINT, { method: 'POST', headers: { client: 'web' }, body: fd });
+    fetch(SEARCH_ENDPOINT, {
+      method: 'POST',
+      headers: { client: 'web' },
+      body: fd,
+    });
 
   /* -------------- text search ----------------- */
   const fetchText = async (offset = 0) => {
@@ -151,7 +171,7 @@ export default function SearchTab() {
         search_id: lastSearchId.current,
         ...filterFields,
       });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok) throw new Error(res.statusText);
       appendJson(await res.json());
     } catch (e: any) {
       setError(e.message || 'Network error');
@@ -181,12 +201,50 @@ export default function SearchTab() {
         JSON.stringify({ x: 5, y: 5, width: 90, height: 90 }),
       );
       fd.append('search_id', lastSearchId.current as string);
-      Object.entries(filterFields).forEach(([k, v]) => fd.append(k, String(v)));
+      Object.entries(filterFields).forEach(([k, v]) =>
+        fd.append(k, String(v)),
+      );
       fd.append('file', blob as any, 'img.jpg');
 
       const res = await postMultipart(fd);
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.ok) throw new Error(res.statusText);
       appendJson(await res.json());
+    } catch (e: any) {
+      setError(e.message || 'Network error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /* -------------- detail + similar fetch ------ */
+  const openDetail = async (hash: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      /* 1️⃣ primary product */
+      const det = await fetch(DETAIL_ENDPOINT, {
+        method: 'POST',
+        headers: { client: 'web', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color_hashes: [hash] }),
+      });
+      if (!det.ok) throw new Error(det.statusText);
+      const detJson = await det.json();
+      const first: Product | undefined = detJson?.data?.[0];
+      if (first) {
+        setDetailProduct(first);
+        setDetailImgIdx(0);
+      }
+
+      /* 2️⃣ similar products */
+      const sim = await fetch(SIMILAR_ENDPOINT, {
+        method: 'POST',
+        headers: { client: 'web', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color_text_hash: hash }),
+      });
+      if (!sim.ok) throw new Error(sim.statusText);
+      const simJson = await sim.json();
+      setSimilarProducts(simJson?.similar_product_results ?? []);
     } catch (e: any) {
       setError(e.message || 'Network error');
     } finally {
@@ -196,7 +254,6 @@ export default function SearchTab() {
 
   /* -------------- UI handlers ---------------- */
   const runTextSearch = () => fetchText(0);
-
   const debounced = useRef(debounce(runTextSearch, 500)).current;
 
   const handlePickImage = async () => {
@@ -211,7 +268,7 @@ export default function SearchTab() {
   };
 
   const handleEndReached = () => {
-    if (visible.length >= rawResults.length) return; // prevent duplicate
+    if (visible.length >= rawResults.length) return;
     if (picked) fetchImage(picked, rawResults.length);
     else fetchText(rawResults.length);
   };
@@ -227,32 +284,37 @@ export default function SearchTab() {
   const removeBrand = (b: string) =>
     setSelectedBrands(selectedBrands.filter((x) => x !== b));
 
-  /* ---------------- memo helpers -------------- */
+  /* memo helpers */
   const keyExtractor = useCallback(
     (item: Product) => String(item.id),
     [],
   );
   const renderItem = useCallback(
     ({ item }: { item: Product }) => (
-      <ProductCard item={item} numColumns={numColumns} />
+      <ProductCard
+        item={item}
+        numColumns={numColumns}
+        onSelectHash={openDetail}
+      />
     ),
     [numColumns],
   );
 
-  const hasActiveFilters = selectedBrands.length > 0 || priceMin !== undefined || priceMax !== undefined;
+  /* filter-icon active state */
+  const hasActiveFilters =
+    selectedBrands.length > 0 ||
+    priceMin !== undefined ||
+    priceMax !== undefined;
 
   /* ---------------- UI ----------------------- */
   return (
     <SafeAreaView style={styles.container}>
-      {/* search row */}
+      {/* search bar */}
       <View style={styles.searchWrapper}>
         <TextInput
           placeholder="Search…"
           value={query}
-          onChangeText={(t) => {
-            setQuery(t);
-            // debounced(); // enable live search
-          }}
+          onChangeText={setQuery}
           onSubmitEditing={runTextSearch}
           style={styles.input}
           returnKeyType="search"
@@ -265,24 +327,22 @@ export default function SearchTab() {
         </Pressable>
       </View>
 
-      {/* filter icon row */}
-<View style={styles.filterRow}>
-  <Pressable
-    onPress={() => setFilterVisible(true)}
-    /* merge the extra style when active */
-    style={[
-      styles.filterIcon,
-      hasActiveFilters && styles.filterIconActive,
-    ]}
-  >
-    <Feather
-      name="sliders"
-      size={20}
-      /* white when active, grey when not */
-      color={hasActiveFilters ? '#fff' : '#444'}
-    />
-  </Pressable>
-</View>
+      {/* filter icon */}
+      <View style={styles.filterRow}>
+        <Pressable
+          onPress={() => setFilterVisible(true)}
+          style={[
+            styles.filterIcon,
+            hasActiveFilters && styles.filterIconActive,
+          ]}
+        >
+          <Feather
+            name="sliders"
+            size={20}
+            color={hasActiveFilters ? '#fff' : '#444'}
+          />
+        </Pressable>
+      </View>
 
       {/* status */}
       {loading && (
@@ -290,7 +350,7 @@ export default function SearchTab() {
       )}
       {error && <Text style={styles.error}>{error}</Text>}
 
-      {/* results */}
+      {/* results grid */}
       <FlatList
         key={numColumns}
         numColumns={numColumns}
@@ -307,148 +367,413 @@ export default function SearchTab() {
         removeClippedSubviews={Platform.OS !== 'web'}
       />
 
-      {/* ---------- FILTER MODAL ---------- */}
-      <Modal
-        visible={filterVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setFilterVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => setFilterVisible(false)}
-            />
-          <View style={styles.modalCard}>
-            <ScrollView>
-              {/* brand section */}
-              <Text style={styles.modalHeader}>Brand</Text>
-              <View style={styles.brandRow}>
-                <TextInput
-                  placeholder="Add your brand"
-                  style={styles.brandInput}
-                  value={brandInput}
-                  onChangeText={setBrandInput}
-                  onSubmitEditing={addBrand}
-                />
-                <Pressable onPress={addBrand} style={styles.addBtn}>
-                  <Text style={{ color: '#fff' }}>Add</Text>
-                </Pressable>
-              </View>
-              <View style={styles.brandChipWrap}>
-                {selectedBrands.map((b) => (
-                  <View key={b} style={styles.chip}>
-                    <Text style={{ marginRight: 4 }}>{b}</Text>
-                    <Pressable onPress={() => removeBrand(b)}>
-                      <Feather name="x" size={14} />
-                    </Pressable>
-                  </View>
-                ))}
-              </View>
+      {/* ----------- FILTER MODAL ---------- */}
+      {filterVisible && (
+        <FilterModal
+          visible={filterVisible}
+          onClose={() => setFilterVisible(false)}
+          brandInput={brandInput}
+          setBrandInput={setBrandInput}
+          selectedBrands={selectedBrands}
+          addBrand={addBrand}
+          removeBrand={removeBrand}
+          priceMin={priceMin}
+          priceMax={priceMax}
+          setPriceMin={setPriceMin}
+          setPriceMax={setPriceMax}
+          reset={() => {
+            setSelectedBrands([]);
+            setPriceMin(undefined);
+            setPriceMax(undefined);
+          }}
+          apply={() => {
+            setFilterVisible(false);
+            picked ? fetchImage(picked, 0) : fetchText(0);
+          }}
+        />
+      )}
 
-              {/* price section */}
-              <Text style={[styles.modalHeader, { marginTop: 16 }]}>
-                Price
-              </Text>
-              {PRICE_PRESETS.map((p) => (
-                <Pressable
-                  key={p.label}
-                  style={styles.radioRow}
-                  onPress={() => {
-                    setPriceMin(p.min);
-                    setPriceMax(p.max);
-                  }}
-                >
-                  <View style={styles.radioOuter}>
-                    {priceMin === p.min && priceMax === p.max && (
-                      <View style={styles.radioInner} />
-                    )}
-                  </View>
-                  <Text>{p.label}</Text>
-                </Pressable>
-              ))}
-              <View style={styles.customRow}>
-                <TextInput
-                  placeholder="Min"
-                  keyboardType="numeric"
-                  style={styles.customInput}
-                  value={priceMin !== undefined ? String(priceMin) : ''}
-                  onChangeText={(v) =>
-                    setPriceMin(v ? Number(v) : undefined)
-                  }
-                />
-                <Text style={{ marginHorizontal: 4 }}>–</Text>
-                <TextInput
-                  placeholder="Max"
-                  keyboardType="numeric"
-                  style={styles.customInput}
-                  value={priceMax !== undefined ? String(priceMax) : ''}
-                  onChangeText={(v) =>
-                    setPriceMax(v ? Number(v) : undefined)
-                  }
-                />
-              </View>
-            </ScrollView>
-
-            {/* modal actions */}
-            <View style={styles.modalActions}>
-              <Pressable
-                onPress={() => {
-                  setSelectedBrands([]);
-                  setPriceMin(undefined);
-                  setPriceMax(undefined);
-                }}
-                style={[styles.actBtn, { backgroundColor: '#eee' }]}
-              >
-                <Text>Reset</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  setFilterVisible(false);
-                  // re-issue current search with filters
-                  picked ? fetchImage(picked, 0) : fetchText(0);
-                }}
-                style={[styles.actBtn, { backgroundColor: '#ff5a5f' }]}
-              >
-                <Text style={{ color: '#fff' }}>Apply</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* ----------- PRODUCT DETAIL MODAL -------- */}
+      {detailProduct && (
+        <ProductDetailModal
+          product={detailProduct}
+          imgIdx={detailImgIdx}
+          setImgIdx={setDetailImgIdx}
+          similar={similarProducts}
+          openDetail={openDetail}
+          onClose={() => setDetailProduct(null)}
+        />
+      )}
     </SafeAreaView>
   );
 }
 
-/* ───────────── Card ───────────── */
+/* ─────────── Product Card (grid) ─────────── */
 interface CardProps {
   item: Product;
   numColumns: number;
+  onSelectHash: (hash: string) => void;
 }
-const ProductCard = memo(({ item, numColumns }: CardProps) => {
-  const cardWidth: DimensionValue = `${100 / numColumns - 2}%`;
-  return (
-    <View style={[styles.card, { width: cardWidth }]}>
-      <Image
-        source={{ uri: item.image }}
-        style={styles.image}
-        contentFit="cover"
-        transition={250}
-      />
-      <View style={styles.textSection}>
-        {item.brand_name && (
-          <Text style={styles.brand}>{item.brand_name}</Text>
-        )}
-        <Text style={styles.title} numberOfLines={2}>
-          {item.title}
-        </Text>
-        <Text style={styles.price}>
-          ₹ {item.discounted_price ?? item.price}
-        </Text>
+const ProductCard = memo(
+  ({ item, numColumns, onSelectHash }: CardProps) => {
+    const cardWidth: DimensionValue = `${100 / numColumns - 2}%`;
+
+    return (
+      <Pressable
+        onPress={() =>
+          item.color_text_hash && onSelectHash(item.color_text_hash)
+        }
+        style={({ hovered }) => [
+          styles.card,
+          { width: cardWidth },
+          hovered && ({ opacity: 0.7, cursor: 'pointer' } as any),
+        ]}
+      >
+        <Image
+          source={{ uri: item.image }}
+          style={styles.image}
+          contentFit="cover"
+          transition={250}
+        />
+        <View style={styles.textSection}>
+          {!!item.brand_name && (
+            <Text style={styles.brand}>{item.brand_name}</Text>
+          )}
+          <Text style={styles.title} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.price}>
+            ₹ {item.discounted_price ?? item.price}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  },
+);
+
+/* ─────────── Filter Modal (unchanged) ─────────── */
+interface FMProps {
+  visible: boolean;
+  onClose: () => void;
+  brandInput: string;
+  setBrandInput: (s: string) => void;
+  selectedBrands: string[];
+  addBrand: () => void;
+  removeBrand: (b: string) => void;
+  priceMin: number | undefined;
+  priceMax: number | undefined;
+  setPriceMin: (v: number | undefined) => void;
+  setPriceMax: (v: number | undefined) => void;
+  reset: () => void;
+  apply: () => void;
+}
+const FilterModal = ({
+  visible,
+  onClose,
+  brandInput,
+  setBrandInput,
+  selectedBrands,
+  addBrand,
+  removeBrand,
+  priceMin,
+  priceMax,
+  setPriceMin,
+  setPriceMax,
+  reset,
+  apply,
+}: FMProps) => (
+  <Modal visible={visible} animationType="slide" transparent>
+    <View style={styles.modalBackdrop}>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <View style={styles.modalCard}>
+        <ScrollView>
+          {/* brand */}
+          <Text style={styles.modalHeader}>Brand</Text>
+          <View style={styles.brandRow}>
+            <TextInput
+              placeholder="Add your brand"
+              style={styles.brandInput}
+              value={brandInput}
+              onChangeText={setBrandInput}
+              onSubmitEditing={addBrand}
+            />
+            <Pressable onPress={addBrand} style={styles.addBtn}>
+              <Text style={{ color: '#fff' }}>Add</Text>
+            </Pressable>
+          </View>
+          <View style={styles.brandChipWrap}>
+            {selectedBrands.map((b) => (
+              <View key={b} style={styles.chip}>
+                <Text style={{ marginRight: 4 }}>{b}</Text>
+                <Pressable onPress={() => removeBrand(b)}>
+                  <Feather name="x" size={14} />
+                </Pressable>
+              </View>
+            ))}
+          </View>
+
+          {/* price */}
+          <Text style={[styles.modalHeader, { marginTop: 16 }]}>Price</Text>
+          {PRICE_PRESETS.map((p) => (
+            <Pressable
+              key={p.label}
+              style={styles.radioRow}
+              onPress={() => {
+                setPriceMin(p.min);
+                setPriceMax(p.max);
+              }}
+            >
+              <View style={styles.radioOuter}>
+                {priceMin === p.min && priceMax === p.max && (
+                  <View style={styles.radioInner} />
+                )}
+              </View>
+              <Text>{p.label}</Text>
+            </Pressable>
+          ))}
+          <View style={styles.customRow}>
+            <TextInput
+              placeholder="Min"
+              keyboardType="numeric"
+              style={styles.customInput}
+              value={priceMin !== undefined ? String(priceMin) : ''}
+              onChangeText={(v) =>
+                setPriceMin(v ? Number(v) : undefined)
+              }
+            />
+            <Text style={{ marginHorizontal: 4 }}>–</Text>
+            <TextInput
+              placeholder="Max"
+              keyboardType="numeric"
+              style={styles.customInput}
+              value={priceMax !== undefined ? String(priceMax) : ''}
+              onChangeText={(v) =>
+                setPriceMax(v ? Number(v) : undefined)
+              }
+            />
+          </View>
+        </ScrollView>
+
+        {/* actions */}
+        <View style={styles.modalActions}>
+          <Pressable
+            onPress={reset}
+            style={[styles.actBtn, { backgroundColor: '#eee' }]}
+          >
+            <Text>Reset</Text>
+          </Pressable>
+          <Pressable
+            onPress={apply}
+            style={[styles.actBtn, { backgroundColor: '#ff5a5f' }]}
+          >
+            <Text style={{ color: '#fff' }}>Apply</Text>
+          </Pressable>
+        </View>
       </View>
     </View>
+  </Modal>
+);
+
+/* ─────────── Product Detail Modal ─────────── */
+interface DMProps {
+  product: Product;
+  imgIdx: number;
+  setImgIdx: (i: number) => void;
+  similar: Product[];
+  openDetail: (hash: string) => void;
+  onClose: () => void;
+}
+const ProductDetailModal = ({
+  product,
+  imgIdx,
+  setImgIdx,
+  similar,
+  openDetail,
+  onClose,
+}: DMProps) => {
+  const images =
+    product.primary_images?.length > 0
+      ? product.primary_images
+      : [product.image];
+
+  const discount =
+    product.price && product.discounted_price
+      ? Math.round(
+          ((Number(product.price.replace(/,/g, '')) -
+            Number(product.discounted_price.replace(/,/g, ''))) /
+            Number(product.price.replace(/,/g, ''))) *
+            100,
+        )
+      : null;
+
+  const { width } = useWindowDimensions();
+  const isWide = width >= 900;
+  const simColumns = getNumColumns(width);
+
+  return (
+    <Modal visible animationType="slide">
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+        {/* close */}
+        <Pressable
+          onPress={onClose}
+          style={{ position: 'absolute', top: 10, right: 10, zIndex: 10 }}
+        >
+          <AntDesign name="closecircle" size={28} color="#444" />
+        </Pressable>
+
+        <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+          <View
+            style={[
+              { padding: 16 },
+              isWide && { flexDirection: 'row', gap: 16 },
+            ]}
+          >
+            {/* thumbnails */}
+            {isWide && (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {images.map((uri, idx) => (
+                  <Pressable
+                    key={uri}
+                    onPress={() => setImgIdx(idx)}
+                    style={[
+                      {
+                        marginBottom: 8,
+                        borderWidth: 2,
+                        borderColor: 'transparent',
+                      },
+                      idx === imgIdx && { borderColor: '#ff5a5f' },
+                    ]}
+                  >
+                    <Image
+                      source={{ uri }}
+                      style={{ width: 60, height: 90 }}
+                      contentFit="cover"
+                    />
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+
+            {/* hero image */}
+            <Image
+              source={{ uri: images[imgIdx] }}
+              style={{ flex: 1, aspectRatio: 3 / 4, borderRadius: 8 }}
+              contentFit="cover"
+            />
+
+            {/* info */}
+            <View style={[{ flex: 1 }, isWide && { paddingLeft: 24 }]}>
+              <Text style={{ fontSize: 20, fontWeight: '700', marginTop: 8 }}>
+                {product.brand_name}
+              </Text>
+              <Text
+                style={{ fontSize: 18, fontWeight: '500', color: '#555' }}
+              >
+                {product.title}
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text
+                  style={{
+                    fontSize: 24,
+                    fontWeight: '700',
+                    marginRight: 8,
+                  }}
+                >
+                  ₹ {product.discounted_price ?? product.price}
+                </Text>
+                {product.discounted_price && (
+                  <Text
+                    style={{
+                      textDecorationLine: 'line-through',
+                      color: '#999',
+                      marginRight: 6,
+                    }}
+                  >
+                    ₹ {product.price}
+                  </Text>
+                )}
+                {discount !== null && (
+                  <Text style={{ color: 'green', fontWeight: '600' }}>
+                    ({discount}% off)
+                  </Text>
+                )}
+              </View>
+
+              {/* size chips if present */}
+              {!!product.variant_value_1 && (
+                <>
+                  <Text
+                    style={{
+                      fontWeight: '600',
+                      marginTop: 16,
+                      marginBottom: 4,
+                    }}
+                  >
+                    size
+                  </Text>
+                  <Pressable style={styles.sizeChip}>
+                    <Text>{product.variant_value_1}</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* CTA button */}
+              <Pressable
+                onPress={() => {
+                  if (product.link) Linking.openURL(product.link);
+                }}
+                style={styles.shopBtn}
+              >
+                <Text style={{ color: '#fff', fontWeight: '600' }}>
+                  Shop Now
+                </Text>
+              </Pressable>
+
+              {/* description */}
+              {!!product.description && (
+                <Text style={{ marginTop: 12, lineHeight: 20 }}>
+                  {product.description}
+                </Text>
+              )}
+            </View>
+          </View>
+
+          {/* similar products */}
+          {similar.length > 0 && (
+            <>
+              <Text
+                style={{
+                  fontSize: 18,
+                  fontWeight: '600',
+                  marginLeft: 16,
+                  marginBottom: 8,
+                }}
+              >
+                Similar products
+              </Text>
+              <FlatList
+                data={similar}
+                key={simColumns}
+                numColumns={simColumns}
+                renderItem={({ item }) => (
+                  <ProductCard
+                    item={item}
+                    numColumns={simColumns}
+                    onSelectHash={openDetail}
+                  />
+                )}
+                keyExtractor={(item) => String(item.id)}
+                contentContainerStyle={{ paddingHorizontal: 16, gap: 12 }}
+                columnWrapperStyle={simColumns > 1 && { gap: 12 }}
+                scrollEnabled={false}
+              />
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
   );
-});
+};
 
 /* ───────────── Styles ───────────── */
 const styles = StyleSheet.create({
@@ -485,7 +810,7 @@ const styles = StyleSheet.create({
   },
   buttonText: { color: '#fff', fontWeight: '600' },
 
-  /* filter icon row */
+  /* filter icon */
   filterRow: { flexDirection: 'row', paddingLeft: 12, marginTop: 4 },
   filterIcon: {
     width: 36,
@@ -495,14 +820,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-    filterIconActive: {
-    backgroundColor: '#000',
-  },
+  filterIconActive: { backgroundColor: '#000' },
 
   /* message */
   error: { color: 'crimson', textAlign: 'center', marginTop: 16 },
 
-  /* list item */
+  /* card */
   card: {
     backgroundColor: '#fff',
     borderRadius: 10,
@@ -519,7 +842,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 14, fontWeight: '500', marginVertical: 2 },
   price: { fontSize: 16, fontWeight: '700' },
 
-  /* modal */
+  /* modal backdrop + card */
   modalBackdrop: {
     flex: 1,
     backgroundColor: '#0006',
@@ -535,7 +858,7 @@ const styles = StyleSheet.create({
   },
   modalHeader: { fontSize: 16, fontWeight: '600', marginBottom: 8 },
 
-  /* brand */
+  /* brand chip & row */
   brandRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   brandInput: {
     flex: 1,
@@ -568,7 +891,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
 
-  /* price */
+  /* price radios */
   radioRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -613,4 +936,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+
+  /* product detail */
+  sizeChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 20,
+  },
+  shopBtn: {
+    marginTop: 12,
+    backgroundColor: '#ff5a5f',
+    borderRadius: 8,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 });
+
+
+
+
